@@ -147,7 +147,8 @@ func TestClientExternalAddress(t *testing.T) {
 				}
 			}
 
-			c := testServer(t, fn)
+			c, done := testServer(t, fn)
+			defer done()
 
 			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 			defer cancel()
@@ -168,7 +169,7 @@ func TestClientExternalAddress(t *testing.T) {
 // lifecycle and eventually finish the serving loop.
 type serverFunc func(req []byte) (res []byte, done bool)
 
-func testServer(t *testing.T, fn serverFunc) *natpmp.Client {
+func testServer(t *testing.T, fn serverFunc) (*natpmp.Client, func()) {
 	t.Helper()
 
 	pc, err := nettest.NewLocalPacketListener("udp4")
@@ -216,13 +217,11 @@ func testServer(t *testing.T, fn serverFunc) *natpmp.Client {
 		t.Fatalf("failed to dial Client: %v", err)
 	}
 
-	t.Cleanup(func() {
+	return c, func() {
 		wg.Wait()
 		_ = pc.Close()
 		_ = c.Close()
-	})
-
-	return c
+	}
 }
 
 func panicf(format string, a ...interface{}) {
