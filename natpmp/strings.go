@@ -8,12 +8,12 @@ func _() {
 	// An "invalid array index" compiler error signifies that the constant values have changed.
 	// Re-run the stringer command to generate them again.
 	var x [1]struct{}
-	_ = x[success-0]
 	_ = x[UnsupportedVersion-1]
 	_ = x[NotAuthorized-2]
 	_ = x[NetworkFailure-3]
 	_ = x[OutOfResources-4]
 	_ = x[UnsupportedOpcode-5]
+	_ = x[success-0]
 }
 
 const _Error_name = "successUnsupportedVersionNotAuthorizedNetworkFailureOutOfResourcesUnsupportedOpcode"
