@@ -53,47 +53,43 @@ func TestClientExternalAddress(t *testing.T) {
 		},
 		{
 			name: "short header",
-			fn: func(_ []byte) ([]byte, bool) {
-				return []byte{natpmp.Version, op, 0x00}, true
+			fn: func(_ []byte) []byte {
+				return []byte{natpmp.Version, op, 0x00}
 			},
 			err: io.ErrUnexpectedEOF,
 		},
 		{
 			name: "bad header version",
-			fn: func(_ []byte) ([]byte, bool) {
+			fn: func(_ []byte) []byte {
 				// Always expect version 0.
-				return []byte{natpmp.Version + 1, op, 0x00, 0x00}, true
+				return []byte{natpmp.Version + 1, op, 0x00, 0x00}
 			},
 			err: natpmp.ErrProtocol,
 		},
 		{
 			name: "bad header op",
-			fn: func(_ []byte) ([]byte, bool) {
+			fn: func(_ []byte) []byte {
 				// Always expect a fixed response op.
-				return []byte{natpmp.Version, op + 1, 0x00, 0x00}, true
+				return []byte{natpmp.Version, op + 1, 0x00, 0x00}
 			},
 			err: natpmp.ErrProtocol,
 		},
 		{
 			name: "short message",
-			fn: func(_ []byte) ([]byte, bool) {
-				return []byte{natpmp.Version, op, 0x00, 0x00, 0x00}, true
+			fn: func(_ []byte) []byte {
+				return []byte{natpmp.Version, op, 0x00, 0x00, 0x00}
 			},
 			err: io.ErrUnexpectedEOF,
 		},
 		{
 			name: "network failure",
-			fn: func(_ []byte) ([]byte, bool) {
-				return resNetworkFailure, true
-			},
-			err: natpmp.NetworkFailure,
+			fn:   func(_ []byte) []byte { return resNetworkFailure },
+			err:  natpmp.NetworkFailure,
 		},
 		{
 			name: "success",
-			fn: func(_ []byte) ([]byte, bool) {
-				return resOK, true
-			},
-			ext: ext,
+			fn:   func(_ []byte) []byte { return resOK },
+			ext:  ext,
 		},
 		// In the retry tests, we simulate the first request being dropped so
 		// the client must retry to receive a response.
@@ -101,13 +97,13 @@ func TestClientExternalAddress(t *testing.T) {
 			name: "retry error",
 			fn: func() serverFunc {
 				var done bool
-				return func(_ []byte) ([]byte, bool) {
+				return func(_ []byte) []byte {
 					if !done {
 						done = true
-						return nil, false
+						return nil
 					}
 
-					return resNetworkFailure, true
+					return resNetworkFailure
 				}
 			}(),
 			err: natpmp.NetworkFailure,
@@ -116,13 +112,13 @@ func TestClientExternalAddress(t *testing.T) {
 			name: "retry success",
 			fn: func() serverFunc {
 				var done bool
-				return func(_ []byte) ([]byte, bool) {
+				return func(_ []byte) []byte {
 					if !done {
 						done = true
-						return nil, false
+						return nil
 					}
 
-					return resOK, true
+					return resOK
 				}
 			}(),
 			ext: ext,
@@ -136,7 +132,7 @@ func TestClientExternalAddress(t *testing.T) {
 
 			var fn serverFunc
 			if tt.fn != nil {
-				fn = func(req []byte) ([]byte, bool) {
+				fn = func(req []byte) []byte {
 					// Each request is fixed.
 					if diff := cmp.Diff([]byte{natpmp.Version, 0x00}, req); diff != "" {
 						panicf("unexpected request (-want +got):\n%s", diff)
@@ -165,16 +161,21 @@ func TestClientExternalAddress(t *testing.T) {
 }
 
 // A serverFunc is a function which can simulate a server's request/response
-// lifecycle and eventually finish the serving loop.
-type serverFunc func(req []byte) (res []byte, done bool)
+// lifecycle. A nil return value indicates that no response will be sent.
+type serverFunc func(req []byte) (res []byte)
 
 func testServer(t *testing.T, fn serverFunc) (*natpmp.Client, func()) {
 	t.Helper()
 
+	// Create a local UDP server listener which will invoke fn for each request
+	// to generate responses until the returned done function is invoked and
+	// the context is canceled.
 	pc, err := net.ListenPacket("udp4", "localhost:0")
 	if err != nil {
 		t.Fatalf("failed to bind local UDP server listener: %v", err)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -187,25 +188,24 @@ func testServer(t *testing.T, fn serverFunc) (*natpmp.Client, func()) {
 			return
 		}
 
-		// Read client input and continue to send responses until the serverFunc
-		// reports done.
+		// Read client input and continue to send responses until the context
+		// is canceled.
 		b := make([]byte, 256)
 		for {
 			n, addr, err := pc.ReadFrom(b)
 			if err != nil {
+				if ctx.Err() != nil {
+					// Halted via context.
+					return
+				}
+
 				panicf("failed to read from client: %v", err)
 			}
 
-			res, done := fn(b[:n])
-
-			if res != nil {
+			if res := fn(b[:n]); res != nil {
 				if _, err := pc.WriteTo(res, addr); err != nil {
 					panicf("failed to write to client: %v", err)
 				}
-			}
-
-			if done {
-				return
 			}
 		}
 	}()
@@ -217,6 +217,10 @@ func testServer(t *testing.T, fn serverFunc) (*natpmp.Client, func()) {
 	}
 
 	return c, func() {
+		// Unblock and halt the goroutine.
+		cancel()
+		_ = pc.SetReadDeadline(time.Unix(0, 1))
+
 		wg.Wait()
 		_ = pc.Close()
 		_ = c.Close()
