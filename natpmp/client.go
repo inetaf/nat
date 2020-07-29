@@ -26,14 +26,29 @@ type Error int
 
 // Possible Errors as defined in RFC 6886, section 3.5.
 const (
+	// UnsupportedVersion indicates an unexpected NAT-PMP/PCP protocol version
+	// was used to contact a NAT gateway.
 	UnsupportedVersion Error = 1
-	NotAuthorized      Error = 2
-	NetworkFailure     Error = 3
-	OutOfResources     Error = 4
-	UnsupportedOpcode  Error = 5
 
-	// Although success is technically a result code, we don't expose it
-	// directly to the user because a successful operation returns nil error.
+	// NotAuthorized indicates that the NAT gateway supports mapping but the
+	// mapping functionality is administratively disabled.
+	NotAuthorized Error = 2
+
+	// NetworkFailure indicates that the NAT gateway has not obtained a DHCP
+	// lease and thus cannot provide an external IPv4 address.
+	NetworkFailure Error = 3
+
+	// OutOfResources indicates that the NAT gateway cannot create any more
+	// mappings at this time.
+	OutOfResources Error = 4
+
+	// UnsupportedOpcode indicates that the NAT gateway does not recognize the
+	// requested operation.
+	UnsupportedOpcode Error = 5
+
+	// success indicates a successful request. Although success is technically a
+	// result code, we don't expose it directly to the user because a successful
+	// operation returns nil error.
 	success Error = 0
 )
 
