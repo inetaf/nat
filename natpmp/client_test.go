@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"golang.org/x/net/nettest"
 	"inet.af/nat/natpmp"
 )
 
@@ -91,7 +90,7 @@ func TestClientExternalAddress(t *testing.T) {
 		},
 		{
 			name: "success",
-			fn: func(req []byte) ([]byte, bool) {
+			fn: func(_ []byte) ([]byte, bool) {
 				return resOK, true
 			},
 			ext: ext,
@@ -172,7 +171,7 @@ type serverFunc func(req []byte) (res []byte, done bool)
 func testServer(t *testing.T, fn serverFunc) (*natpmp.Client, func()) {
 	t.Helper()
 
-	pc, err := nettest.NewLocalPacketListener("udp4")
+	pc, err := net.ListenPacket("udp4", "localhost:0")
 	if err != nil {
 		t.Fatalf("failed to bind local UDP server listener: %v", err)
 	}
