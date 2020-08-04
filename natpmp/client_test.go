@@ -160,6 +160,118 @@ func TestClientExternalAddress(t *testing.T) {
 	}
 }
 
+func TestClientMap(t *testing.T) {
+	t.Parallel()
+
+	const op = 128
+
+	tests := []struct {
+		name string
+		fn   serverFunc
+		req  natpmp.MapRequest
+		res  *natpmp.MapResponse
+		err  error
+	}{
+		{
+			name: "bad protocol",
+			req: natpmp.MapRequest{
+				Protocol: natpmp.TCP + 1,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "bad internal port",
+			req: natpmp.MapRequest{
+				Protocol:     natpmp.UDP,
+				InternalPort: 0,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "bad external port",
+			req: natpmp.MapRequest{
+				Protocol:              natpmp.UDP,
+				InternalPort:          80,
+				SuggestedExternalPort: -1,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "short message",
+			fn: func(_ []byte) []byte {
+				return []byte{natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00, 0x00}
+			},
+			req: natpmp.MapRequest{
+				Protocol:     natpmp.UDP,
+				InternalPort: 80,
+			},
+			err: io.ErrUnexpectedEOF,
+		},
+		{
+			name: "success",
+			fn: func(req []byte) []byte {
+				want := []byte{
+					// Header.
+					natpmp.Version, uint8(natpmp.UDP), 0x00, 0x00,
+					// Ports.
+					0x00, 80, 0x00, 80,
+					// Lifetime.
+					0x00, 0x00, 0x1c, 0x20,
+				}
+
+				if diff := cmp.Diff(want, req); diff != "" {
+					panicf("unexpected request (-want +got):\n%s", diff)
+				}
+
+				return []byte{
+					// Header.
+					natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00,
+					// Since start of epoch.
+					0x00, 0x00, 0x00, 60,
+					// Ports.
+					0x00, 80, 0x00, 80,
+					// Lifetime.
+					0x00, 0x00, 0x1c, 0x20,
+				}
+			},
+			req: natpmp.MapRequest{
+				Protocol:              natpmp.UDP,
+				InternalPort:          80,
+				SuggestedExternalPort: 80,
+				RequestedLifetime:     2 * time.Hour,
+			},
+			res: &natpmp.MapResponse{
+				SinceStartOfEpoch: 1 * time.Minute,
+				InternalPort:      80,
+				ExternalPort:      80,
+				Lifetime:          2 * time.Hour,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, done := testServer(t, tt.fn)
+			defer done()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+
+			res, err := c.Map(ctx, tt.req)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("unexpected error (-want +got):\n%s", cmp.Diff(tt.err, err))
+			}
+
+			if diff := cmp.Diff(tt.res, res); diff != "" {
+				t.Fatalf("unexpected map response (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // A serverFunc is a function which can simulate a server's request/response
 // lifecycle. A nil return value indicates that no response will be sent.
 type serverFunc func(req []byte) (res []byte)

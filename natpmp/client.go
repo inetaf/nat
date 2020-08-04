@@ -14,11 +14,14 @@ import (
 // Version is the expected protocol version for NAT-PMP.
 const Version = 0
 
-// ErrProtocol indicates that a NAT gateway returned a response that violates
-// the NAT-PMP protocol.
-var ErrProtocol = errors.New("natpmp: protocol error")
+var (
+	// ErrBadRequest indicates an invalid parameter in a Client's request.
+	ErrBadRequest = errors.New("natpmp: bad request")
 
-//go:generate stringer -type=Error -output=strings.go
+	// ErrProtocol indicates that a NAT gateway returned a response that violates
+	// the NAT-PMP protocol.
+	ErrProtocol = errors.New("natpmp: protocol error")
+)
 
 // An Error is a NAT-PMP protocol result code which indicates that an operation
 // has failed.
@@ -128,6 +131,43 @@ func (c *Client) ExternalAddress(ctx context.Context) (*ExternalAddress, net.Add
 	}, addr, nil
 }
 
+// Map creates an external port mapping with a NAT gateway, as described in
+// RFC 4886, section 3.3. See the documentation of MapRequest for the necessary
+// parameters.
+func (c *Client) Map(ctx context.Context, mr MapRequest) (*MapResponse, error) {
+	mb, err := mr.marshal()
+	if err != nil {
+		// Wrap with bad request sentinel for ease of error checking.
+		return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
+
+	// The response has a fixed size and expected base opcode. The protocol
+	// value is added to get the expected response opcode. See:
+	// https://tools.ietf.org/html/rfc6886#section-3.3.
+	const (
+		size  = 16
+		resOp = 128
+	)
+
+	b := make([]byte, size)
+	n, _, err := c.request(ctx, mb, b, resOp+int(mr.Protocol))
+	if err != nil {
+		return nil, err
+	}
+
+	if n != size {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	// Skip first 4 header bytes and parse the remainder of the message.
+	return &MapResponse{
+		SinceStartOfEpoch: time.Duration(binary.BigEndian.Uint32(b[4:8])) * time.Second,
+		InternalPort:      int(binary.BigEndian.Uint16(b[8:10])),
+		ExternalPort:      int(binary.BigEndian.Uint16(b[10:12])),
+		Lifetime:          time.Duration(binary.BigEndian.Uint32(b[12:16])) * time.Second,
+	}, nil
+}
+
 // request serializes and implements backoff/retry for NAT-PMP request/response
 // interactions, as recommended by
 // https://tools.ietf.org/html/rfc6886#section-3.1.
@@ -148,7 +188,9 @@ func (c *Client) request(ctx context.Context, req, res []byte, resOp int) (int, 
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		_ = c.pc.SetDeadline(time.Unix(0, 1))
+		// Only unblock reads because writes won't block, and SetDeadline will
+		// prevent future writes due to I/O timeout.
+		_ = c.pc.SetReadDeadline(time.Unix(0, 1))
 	}()
 
 	// Start with a 250ms delay on timeout error and double it up to 9 times
