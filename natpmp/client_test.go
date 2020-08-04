@@ -272,6 +272,63 @@ func TestClientMap(t *testing.T) {
 	}
 }
 
+func TestClientConcurrent(t *testing.T) {
+	t.Parallel()
+
+	timer := time.AfterFunc(10*time.Second, func() {
+		panic("took too long")
+	})
+	defer timer.Stop()
+
+	// Track the number of calls to the server with a non-atomic increment, so
+	// the race detector will fire if the Client's request serialization logic
+	// is broken.
+	var calls int
+	c, done := testServer(t, func(_ []byte) []byte {
+		calls++
+
+		// Canned external IP response. It's ignored for the purposes of this
+		// test but is considered valid by the client so future requests can
+		// proceed.
+		return []byte{
+			natpmp.Version, 128, 0x00, 0x00,
+			0x00, 0x00, 0x01, 0xff,
+			192, 0, 2, 1,
+		}
+	})
+	defer done()
+
+	// Invoke a large number of concurrent requests to the server to attempt
+	// to trigger the race detector.
+	const (
+		nWorkers = 8
+		nCalls   = 512
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(nWorkers)
+
+	for i := 0; i < nWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < nCalls; j++ {
+				if _, _, err := c.ExternalAddress(context.Background()); err != nil {
+					panicf("failed to get external address: %v", err)
+				}
+			}
+		}()
+	}
+
+	// Halt the clients and server before verifying the total number of
+	// requests.
+	wg.Wait()
+	done()
+
+	if diff := cmp.Diff(nWorkers*nCalls, calls); diff != "" {
+		t.Fatalf("unexpected number of requests (-want +got):\n%s", diff)
+	}
+}
+
 // A serverFunc is a function which can simulate a server's request/response
 // lifecycle. A nil return value indicates that no response will be sent.
 type serverFunc func(req []byte) (res []byte)
