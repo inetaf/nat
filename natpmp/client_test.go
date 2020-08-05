@@ -160,6 +160,224 @@ func TestClientExternalAddress(t *testing.T) {
 	}
 }
 
+func TestClientMap(t *testing.T) {
+	t.Parallel()
+
+	const op = 128
+
+	tests := []struct {
+		name string
+		fn   serverFunc
+		req  natpmp.MapRequest
+		res  *natpmp.MapResponse
+		err  error
+	}{
+		{
+			name: "bad protocol",
+			req: natpmp.MapRequest{
+				Protocol: natpmp.TCP + 1,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "bad internal port",
+			req: natpmp.MapRequest{
+				Protocol:     natpmp.UDP,
+				InternalPort: 0,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "bad external port",
+			req: natpmp.MapRequest{
+				Protocol:              natpmp.UDP,
+				InternalPort:          80,
+				SuggestedExternalPort: -1,
+			},
+			err: natpmp.ErrBadRequest,
+		},
+		{
+			name: "short message",
+			fn: func(_ []byte) []byte {
+				return []byte{natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00, 0x00}
+			},
+			req: natpmp.MapRequest{
+				Protocol:     natpmp.UDP,
+				InternalPort: 80,
+			},
+			err: io.ErrUnexpectedEOF,
+		},
+		{
+			name: "success",
+			fn: func(req []byte) []byte {
+				want := []byte{
+					// Header.
+					natpmp.Version, uint8(natpmp.UDP), 0x00, 0x00,
+					// Ports.
+					0x00, 80, 0x00, 80,
+					// Lifetime.
+					0x00, 0x00, 0x1c, 0x20,
+				}
+
+				if diff := cmp.Diff(want, req); diff != "" {
+					panicf("unexpected request (-want +got):\n%s", diff)
+				}
+
+				return []byte{
+					// Header.
+					natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00,
+					// Since start of epoch.
+					0x00, 0x00, 0x00, 60,
+					// Ports.
+					0x00, 80, 0x00, 80,
+					// Lifetime.
+					0x00, 0x00, 0x1c, 0x20,
+				}
+			},
+			req: natpmp.MapRequest{
+				Protocol:              natpmp.UDP,
+				InternalPort:          80,
+				SuggestedExternalPort: 80,
+				RequestedLifetime:     2 * time.Hour,
+			},
+			res: &natpmp.MapResponse{
+				SinceStartOfEpoch: 1 * time.Minute,
+				InternalPort:      80,
+				ExternalPort:      80,
+				Lifetime:          2 * time.Hour,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, done := testServer(t, tt.fn)
+			defer done()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+
+			res, err := c.Map(ctx, tt.req)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("unexpected error (-want +got):\n%s", cmp.Diff(tt.err, err))
+			}
+
+			if diff := cmp.Diff(tt.res, res); diff != "" {
+				t.Fatalf("unexpected map response (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestClientUnmap(t *testing.T) {
+	t.Parallel()
+
+	const op = 128
+
+	c, done := testServer(t, func(req []byte) []byte {
+		want := []byte{
+			// Header.
+			natpmp.Version, uint8(natpmp.UDP), 0x00, 0x00,
+			// Ports/lifetime: only InternalPort may be set.
+			0x01, 0xbb, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00,
+		}
+
+		if diff := cmp.Diff(want, req); diff != "" {
+			panicf("unexpected request (-want +got):\n%s", diff)
+		}
+
+		return []byte{
+			// Header.
+			natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00,
+			// Since start of epoch.
+			0x00, 0x00, 0x00, 60,
+			// Ports.
+			0x01, 0xbb, 0x00, 0x00,
+			// Lifetime.
+			0x00, 0x00, 0x00, 0x00,
+		}
+	})
+	defer done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	res, err := c.Unmap(ctx, natpmp.UDP, 443)
+	if err != nil {
+		t.Fatalf("failed to unmap: %v", err)
+	}
+
+	want := &natpmp.MapResponse{
+		SinceStartOfEpoch: 1 * time.Minute,
+		InternalPort:      443,
+	}
+
+	if diff := cmp.Diff(want, res); diff != "" {
+		t.Fatalf("unexpected map response (-want +got):\n%s", diff)
+	}
+}
+
+func TestClientConcurrent(t *testing.T) {
+	t.Parallel()
+
+	timer := time.AfterFunc(10*time.Second, func() {
+		panic("took too long")
+	})
+	defer timer.Stop()
+
+	// Track the number of calls to the server with a non-atomic increment, so
+	// the race detector will fire if the Client's request serialization logic
+	// is broken.
+	var calls int
+	c, done := testServer(t, func(_ []byte) []byte {
+		calls++
+
+		// Canned external IP response. It's ignored for the purposes of this
+		// test but is considered valid by the client so future requests can
+		// proceed.
+		return []byte{
+			natpmp.Version, 128, 0x00, 0x00,
+			0x00, 0x00, 0x01, 0xff,
+			192, 0, 2, 1,
+		}
+	})
+	defer done()
+
+	// Invoke a large number of concurrent requests to the server to attempt
+	// to trigger the race detector.
+	const (
+		nWorkers = 8
+		nCalls   = 512
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(nWorkers)
+
+	for i := 0; i < nWorkers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < nCalls; j++ {
+				if _, _, err := c.ExternalAddress(context.Background()); err != nil {
+					panicf("failed to get external address: %v", err)
+				}
+			}
+		}()
+	}
+
+	// Halt the clients and server before verifying the total number of
+	// requests.
+	wg.Wait()
+	done()
+
+	if diff := cmp.Diff(nWorkers*nCalls, calls); diff != "" {
+		t.Fatalf("unexpected number of requests (-want +got):\n%s", diff)
+	}
+}
+
 // A serverFunc is a function which can simulate a server's request/response
 // lifecycle. A nil return value indicates that no response will be sent.
 type serverFunc func(req []byte) (res []byte)
