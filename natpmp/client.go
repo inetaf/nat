@@ -168,6 +168,17 @@ func (c *Client) Map(ctx context.Context, mr MapRequest) (*MapResponse, error) {
 	}, nil
 }
 
+// Unmap removes an external port mapping from a NAT gateway. Unmap is a
+// convenience wrapper for Map that specifies the necessary parameters to remove
+// a mapping.
+func (c *Client) Unmap(ctx context.Context, protocol Protocol, internalPort int) (*MapResponse, error) {
+	return c.Map(ctx, MapRequest{
+		Protocol:     protocol,
+		InternalPort: internalPort,
+		// SuggestedExternalPort and RequestedLifetime must be zero.
+	})
+}
+
 // request serializes and implements backoff/retry for NAT-PMP request/response
 // interactions, as recommended by
 // https://tools.ietf.org/html/rfc6886#section-3.1.

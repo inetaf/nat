@@ -272,6 +272,55 @@ func TestClientMap(t *testing.T) {
 	}
 }
 
+func TestClientUnmap(t *testing.T) {
+	t.Parallel()
+
+	const op = 128
+
+	c, done := testServer(t, func(req []byte) []byte {
+		want := []byte{
+			// Header.
+			natpmp.Version, uint8(natpmp.UDP), 0x00, 0x00,
+			// Ports/lifetime: only InternalPort may be set.
+			0x01, 0xbb, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00,
+		}
+
+		if diff := cmp.Diff(want, req); diff != "" {
+			panicf("unexpected request (-want +got):\n%s", diff)
+		}
+
+		return []byte{
+			// Header.
+			natpmp.Version, op + uint8(natpmp.UDP), 0x00, 0x00,
+			// Since start of epoch.
+			0x00, 0x00, 0x00, 60,
+			// Ports.
+			0x01, 0xbb, 0x00, 0x00,
+			// Lifetime.
+			0x00, 0x00, 0x00, 0x00,
+		}
+	})
+	defer done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	res, err := c.Unmap(ctx, natpmp.UDP, 443)
+	if err != nil {
+		t.Fatalf("failed to unmap: %v", err)
+	}
+
+	want := &natpmp.MapResponse{
+		SinceStartOfEpoch: 1 * time.Minute,
+		InternalPort:      443,
+	}
+
+	if diff := cmp.Diff(want, res); diff != "" {
+		t.Fatalf("unexpected map response (-want +got):\n%s", diff)
+	}
+}
+
 func TestClientConcurrent(t *testing.T) {
 	t.Parallel()
 
